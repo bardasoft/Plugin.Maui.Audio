@@ -2,6 +2,7 @@
 <ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
 			 xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
 			 xmlns:viewmodels="clr-namespace:Plugin.Maui.Audio.Sample.ViewModels"
+			 xmlns:pages="clr-namespace:Plugin.Maui.Audio.Sample.Pages"
 			 x:Class="Plugin.Maui.Audio.Sample.Pages.MyLibraryPage"
 			 Title="My Library"
 			 x:Name="myLibraryPage"
@@ -44,23 +45,19 @@
 						SelectionMode="Single">
 			<CollectionView.ItemTemplate>
 				<DataTemplate x:DataType="viewmodels:MusicItemViewModel">
-					<Border Style="{StaticResource border_gallery_card}">
+					<Border Style="{StaticResource border_gallery_card}" Margin="5">
 						<Border.GestureRecognizers>
-							<TapGestureRecognizer Command="{Binding Path=BindingContext.OpenMusicCommand, Source={x:Reference myLibraryPage}, x:DataType={x:Type viewmodels:MyLibraryPageViewModel}}"
+							<TapGestureRecognizer Command="{Binding Path=BindingContext.OpenMusicCommand, Source={x:Reference myLibraryPage}, x:DataType={x:Type pages:MyLibraryPage}}"
 												  CommandParameter="{Binding .}" />
 						</Border.GestureRecognizers>
-						<Grid ColumnDefinitions="75,*"
+						<Grid ColumnDefinitions="*"
 							  InputTransparent="True"
-							  RowDefinitions="3*,2*"
-							  ColumnSpacing="8">
-							<!-- Placeholder for imagery -->
-							<Image BackgroundColor="{AppThemeBinding Light={StaticResource Gray200}, Dark={StaticResource Gray950}}"
-								   Grid.RowSpan="2" />
+							  RowDefinitions="3*,2*">
 
 							<Label Text="{Binding Title}"
-								   FontSize="32"
+								   FontSize="28"
 								   FontAttributes="Bold"
-								   Grid.Column="1" />
+								   LineBreakMode="TailTruncation" />
 
 							<Label Text="{Binding Artist}"
 								   FontSize="20"
