@@ -16,6 +16,14 @@ partial class AudioPlayer : IAudioPlayer
 	MemoryStream? stream;
 	bool isDisposed = false;
 	AudioStopwatch stopwatch = new(TimeSpan.Zero, 1.0);
+	Android.Media.AudioManager? audioManager;
+	AudioFocusRequestClass? audioFocusRequest;
+	AudioFocusChangeListener? audioFocusChangeListener;
+	bool wasPlayingBeforeFocusLoss = false;
+	double volumeBeforeDucking = 0;
+	AudioPlayerOptions? audioPlayerOptions;
+
+	const double DuckingVolumeMultiplier = 0.2;
 
 	public double Duration => player.Duration <= -1 ? -1 : player.Duration / 1000.0;
 
@@ -184,6 +192,14 @@ partial class AudioPlayer : IAudioPlayer
 	internal AudioPlayer(AudioPlayerOptions audioPlayerOptions)
 	{
 		player = new MediaPlayer();
+		this.audioPlayerOptions = audioPlayerOptions;
+
+		// Initialize audio manager and focus listener only if audio focus management is enabled
+		if (audioPlayerOptions.ManageAudioFocus)
+		{
+			audioManager = (Android.Media.AudioManager?)Android.App.Application.Context.GetSystemService(Android.Content.Context.AudioService);
+			audioFocusChangeListener = new AudioFocusChangeListener(this);
+		}
 
 		if (OperatingSystem.IsAndroidVersionAtLeast(26))
 		{
@@ -195,6 +211,15 @@ partial class AudioPlayer : IAudioPlayer
 			if (audioAttributes is not null)
 			{
 				player.SetAudioAttributes(audioAttributes);
+
+				// Build audio focus request for Android 26+ only if audio focus management is enabled
+				if (audioPlayerOptions.ManageAudioFocus && audioManager is not null && audioFocusChangeListener is not null)
+				{
+					audioFocusRequest = new AudioFocusRequestClass.Builder(AudioFocus.Gain)?
+						.SetAudioAttributes(audioAttributes)?
+						.SetOnAudioFocusChangeListener(audioFocusChangeListener)?
+						.Build();
+				}
 			}
 		}
 		else
@@ -259,7 +284,14 @@ partial class AudioPlayer : IAudioPlayer
 	{
 		player = new MediaPlayer();
 		player.Completion += OnPlaybackEnded;
+		this.audioPlayerOptions = audioPlayerOptions;
 
+		// Initialize audio manager and focus listener only if audio focus management is enabled
+		if (audioPlayerOptions.ManageAudioFocus)
+		{
+			audioManager = (Android.Media.AudioManager?)Android.App.Application.Context.GetSystemService(Android.Content.Context.AudioService);
+			audioFocusChangeListener = new AudioFocusChangeListener(this);
+		}
 
 		if (OperatingSystem.IsAndroidVersionAtLeast(23))
 		{
@@ -294,6 +326,14 @@ partial class AudioPlayer : IAudioPlayer
 		player = new MediaPlayer();
 		player.Completion += OnPlaybackEnded;
 		player.Error += OnError;
+		this.audioPlayerOptions = audioPlayerOptions;
+
+		// Initialize audio manager and focus listener only if audio focus management is enabled
+		if (audioPlayerOptions.ManageAudioFocus)
+		{
+			audioManager = (Android.Media.AudioManager?)Android.App.Application.Context.GetSystemService(Android.Content.Context.AudioService);
+			audioFocusChangeListener = new AudioFocusChangeListener(this);
+		}
 
 		file = fileName;
 
@@ -330,6 +370,18 @@ partial class AudioPlayer : IAudioPlayer
 			stopwatch.Reset();
 		}
 
+		// Request audio focus before playing
+		if (!RequestAudioFocus())
+		{
+			System.Diagnostics.Trace.TraceWarning("Failed to request audio focus");
+			// Continue playing even if focus request fails for backward compatibility
+		}
+
+		PlayInternal();
+	}
+
+	void PlayInternal()
+	{
 		isPlaying = true;
 		player.Start();
 		stopwatch.Start();
@@ -343,6 +395,9 @@ partial class AudioPlayer : IAudioPlayer
 			player.Pause();
 		}
 
+		// Abandon audio focus when stopping
+		AbandonAudioFocus();
+
 		Seek(0);
 		
 		OnPlaybackEnded(player, EventArgs.Empty);
@@ -355,6 +410,14 @@ partial class AudioPlayer : IAudioPlayer
 			return;
 		}
 
+		PauseInternal();
+
+		// Abandon audio focus when pausing
+		AbandonAudioFocus();
+	}
+
+	void PauseInternal()
+	{
 		isPlaying = false;
 		player.Pause();
 		stopwatch.Stop();
@@ -405,6 +468,109 @@ partial class AudioPlayer : IAudioPlayer
 		OnError(e);
 	}
 
+	bool RequestAudioFocus()
+	{
+		// Check if audio focus management is enabled
+		if (audioPlayerOptions?.ManageAudioFocus != true || audioManager is null)
+		{
+			return false;
+		}
+
+		AudioFocusRequest result;
+
+		if (OperatingSystem.IsAndroidVersionAtLeast(26) && audioFocusRequest is not null)
+		{
+			result = audioManager.RequestAudioFocus(audioFocusRequest);
+		}
+		else
+		{
+			// For API < 26, use deprecated method
+#pragma warning disable CS0618 // Type or member is obsolete
+			result = audioManager.RequestAudioFocus(
+				audioFocusChangeListener,
+				Android.Media.Stream.Music,
+				AudioFocus.Gain);
+#pragma warning restore CS0618 // Type or member is obsolete
+		}
+
+		return result == AudioFocusRequest.Granted;
+	}
+
+	void AbandonAudioFocus()
+	{
+		// Check if audio focus management is enabled
+		if (audioPlayerOptions?.ManageAudioFocus != true || audioManager is null)
+		{
+			return;
+		}
+
+		if (OperatingSystem.IsAndroidVersionAtLeast(26) && audioFocusRequest is not null)
+		{
+			audioManager.AbandonAudioFocusRequest(audioFocusRequest);
+		}
+		else
+		{
+			// For API < 26, use deprecated method
+#pragma warning disable CS0618 // Type or member is obsolete
+			audioManager.AbandonAudioFocus(audioFocusChangeListener);
+#pragma warning restore CS0618 // Type or member is obsolete
+		}
+	}
+
+	void HandleAudioFocusChange(AudioFocus focusChange)
+	{
+		switch (focusChange)
+		{
+			case AudioFocus.Loss:
+				// Permanent loss of audio focus - stop playback
+				// Reset state before Stop() to prevent incorrect state in any callbacks
+				wasPlayingBeforeFocusLoss = false;
+				volumeBeforeDucking = 0;
+				if (IsPlaying)
+				{
+					Stop();
+				}
+				break;
+
+			case AudioFocus.LossTransient:
+				// Temporary loss of audio focus - pause playback
+				if (IsPlaying)
+				{
+					wasPlayingBeforeFocusLoss = true;
+					// Don't abandon audio focus here since we want to resume later
+					PauseInternal();
+				}
+				break;
+
+			case AudioFocus.LossTransientCanDuck:
+				// Temporary loss of audio focus but can duck (lower volume)
+				// Lower the volume but continue playing
+				if (IsPlaying)
+				{
+					volumeBeforeDucking = Volume;
+					Volume = volumeBeforeDucking * DuckingVolumeMultiplier;
+				}
+				break;
+
+			case AudioFocus.Gain:
+				// Regained audio focus
+				if (wasPlayingBeforeFocusLoss)
+				{
+					// Resume playback if it was paused due to transient loss
+					// Use PlayInternal() since we already have audio focus
+					PlayInternal();
+					wasPlayingBeforeFocusLoss = false;
+				}
+				// Restore volume if it was ducked
+				if (volumeBeforeDucking > 0)
+				{
+					Volume = volumeBeforeDucking;
+					volumeBeforeDucking = 0;
+				}
+				break;
+		}
+	}
+
 	protected virtual void Dispose(bool disposing)
 	{
 		if (isDisposed)
@@ -414,6 +580,7 @@ partial class AudioPlayer : IAudioPlayer
 
 		if (disposing)
 		{
+			AbandonAudioFocus();
 			player.Completion -= OnPlaybackEnded;
 			player.Error -= OnError;
 			player.Reset();
@@ -422,8 +589,27 @@ partial class AudioPlayer : IAudioPlayer
 			DeleteFile(cachePath);
 			cachePath = string.Empty;
 			stream?.Dispose();
+			audioFocusRequest?.Dispose();
 		}
 
 		isDisposed = true;
+	}
+
+	/// <summary>
+	/// Listens for audio focus changes from the Android system and delegates handling to the parent AudioPlayer.
+	/// </summary>
+	class AudioFocusChangeListener : Java.Lang.Object, Android.Media.AudioManager.IOnAudioFocusChangeListener
+	{
+		readonly AudioPlayer audioPlayer;
+
+		public AudioFocusChangeListener(AudioPlayer player)
+		{
+			audioPlayer = player;
+		}
+
+		public void OnAudioFocusChange(AudioFocus focusChange)
+		{
+			audioPlayer.HandleAudioFocusChange(focusChange);
+		}
 	}
 }
